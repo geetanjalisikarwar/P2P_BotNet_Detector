@@ -1,1 +1,3 @@
 trained_model.pickle
+/__pycache__
+/.devcontainer
