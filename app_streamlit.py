@@ -6,11 +6,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import StringIO
 from datetime import datetime
-
-# Mock detector_core functions (replace with your actual imports)
-# from detector_core import load_model, clean_dataset, predict_flows
-
-MODEL_PATH = "trained_model.pickle"
+import requests
+import os
 
 # Custom CSS for stunning dark theme
 def load_custom_css():
@@ -123,22 +120,6 @@ def load_custom_css():
     """, unsafe_allow_html=True)
 
 
-# Mock functions (replace with your actual implementation)
-def load_model(model_path):
-    """Load your trained model"""
-    # return pickle.load(open(model_path, 'rb'))
-    return "MockModel"
-
-
-def predict_flows(df, model):
-    """Predict malicious flows"""
-    # Your actual prediction logic here
-    # For demo, randomly mark some as malicious
-    import numpy as np
-    predictions = np.random.choice([0, 1], size=len(df), p=[0.85, 0.15])
-    return df, predictions
-
-
 def main():
     st.set_page_config(
         page_title="P2P Botnet Detector",
@@ -146,9 +127,8 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    
     load_custom_css()
-    
+
     # Header
     st.markdown("""
     <div class="main-header">
@@ -156,19 +136,45 @@ def main():
         <p style="color: #94a3b8; font-size: 1.1rem;">Advanced ML-powered threat detection system</p>
     </div>
     """, unsafe_allow_html=True)
-    
-    # Sidebar
+
+    # Sidebar - API first (Streamlit uses API-hosted model)
     with st.sidebar:
         st.markdown("### ⚙️ Configuration")
-        
-        model_path = st.text_input(
-            "Model Path",
-            MODEL_PATH,
-            help="Path to your trained model file"
-        )
-        
+
+        api_url = st.text_input("Detector API URL", "http://localhost:8000").rstrip("/")
+
         st.markdown("---")
-        
+        st.markdown("### 🔧 Model Management")
+        model_file = st.file_uploader("Upload model (.pkl/.pickle) to API", type=["pkl", "pickle"])
+        if model_file is not None:
+            if st.button("📤 Upload model to API"):
+                try:
+                    files = {"file": (model_file.name, model_file.read(), "application/octet-stream")}
+                    resp = requests.post(f"{api_url}/upload-model", files=files, timeout=60)
+                    resp.raise_for_status()
+                    st.success("Model uploaded and loaded on API server.")
+                except requests.RequestException as e:
+                    st.error(f"❌ Failed to upload model: {e}")
+                except Exception as e:
+                    st.error(f"❌ Unexpected error: {e}")
+
+        if st.button("📥 Download model from API"):
+            try:
+                resp = requests.get(f"{api_url}/download-model", timeout=60)
+                resp.raise_for_status()
+                content = resp.content
+                # derive filename from header or fallback
+                filename = "downloaded_model.pickle"
+                cd = resp.headers.get("content-disposition", "")
+                if "filename=" in cd:
+                    filename = cd.split("filename=")[-1].strip('" ')
+                st.download_button("Save model locally", data=content, file_name=filename, mime="application/octet-stream")
+            except requests.RequestException as e:
+                st.error(f"❌ Failed to download model: {e}")
+            except Exception as e:
+                st.error(f"❌ Unexpected error: {e}")
+
+        st.markdown("---")
         st.markdown("### 📊 Display Options")
         show_raw = st.checkbox("Show raw data", value=False)
         limit_display = st.slider(
@@ -178,9 +184,8 @@ def main():
             value=100,
             step=10
         )
-        
+
         st.markdown("---")
-        
         st.markdown("### 📈 Features")
         st.markdown("""
         - ✅ ML Detection
@@ -188,17 +193,16 @@ def main():
         - ✅ Flow-based Patterns
         - ✅ Advanced Visualization
         """)
-        
         st.markdown("---")
         st.markdown(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    
-    # Main content
+
+    # Main content - CSV upload for prediction
     uploaded_file = st.file_uploader(
         "📂 Upload Network Flow Data (CSV)",
         type=["csv"],
         help="Upload a CSV file with the same schema as training.csv"
     )
-    
+
     if uploaded_file is None:
         # Welcome section when no file is uploaded
         col1, col2, col3 = st.columns(3)
@@ -229,7 +233,7 @@ def main():
         
         st.info("👆 Upload a CSV file to begin threat detection analysis")
         return
-    
+
     # Process uploaded file
     try:
         csv_bytes = uploaded_file.read()
@@ -237,181 +241,64 @@ def main():
     except Exception as e:
         st.error(f"❌ Failed to read CSV: {e}")
         return
-    
+
     if df.empty:
         st.warning("⚠️ Uploaded CSV is empty")
         return
-    
+
     # Show raw data if requested
     if show_raw:
         with st.expander("📄 Raw Data Preview"):
             st.dataframe(df.head(50), use_container_width=True)
-    
-    # Load model and predict
+
+    # Send CSV to FastAPI for prediction (API holds the model)
     try:
-        with st.spinner("🔄 Loading model..."):
-            model = load_model(model_path)
+        with st.spinner("🔍 Sending data to detection API..."):
+            files = {"file": (uploaded_file.name, csv_bytes, "text/csv")}
+            params = {"limit": limit_display}
+            resp = requests.post(f"{api_url}/predict-csv", files=files, params=params, timeout=60)
+            resp.raise_for_status()
+            result = resp.json()
+    except requests.RequestException as e:
+        st.error(f"❌ API request failed: {e}")
+        return
     except Exception as e:
-        st.error(f"❌ Failed to load model: {e}")
+        st.error(f"❌ Unexpected error: {e}")
         return
-    
-    with st.spinner("🔍 Analyzing flows... This may take a moment..."):
-        flows, predictions = predict_flows(df, model)
-        malicious_mask = predictions == 1
-        malicious_flows = flows[malicious_mask].copy()
-    
-    # Calculate metrics
-    total = len(df)
-    mal_count = len(malicious_flows)
-    ratio = mal_count / total if total > 0 else 0
-    benign_count = total - mal_count
-    
-    # Success message
-    st.markdown("""
-    <div class="success-box">
-        <h3>✅ Detection Complete</h3>
-        <p>Analysis finished successfully. Review the results below.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Metrics
-    st.markdown("### 📊 Detection Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric(
-            label="Total Flows",
-            value=f"{total:,}",
-            delta=None
-        )
-    
-    with col2:
-        st.metric(
-            label="Malicious Flows",
-            value=f"{mal_count:,}",
-            delta=f"{ratio*100:.2f}%",
-            delta_color="inverse"
-        )
-    
-    with col3:
-        st.metric(
-            label="Benign Flows",
-            value=f"{benign_count:,}",
-            delta=f"{(1-ratio)*100:.2f}%"
-        )
-    
-    with col4:
-        st.metric(
-            label="Threat Level",
-            value="HIGH" if ratio > 0.1 else "MEDIUM" if ratio > 0.05 else "LOW",
-            delta=None
-        )
-    
-    if mal_count == 0:
-        st.success("🎉 No malicious flows detected. Your network appears clean!")
-        return
-    
-    # Warning if high threat
-    if ratio > 0.1:
-        st.markdown("""
-        <div class="warning-box">
-            <h3>⚠️ High Threat Level Detected</h3>
-            <p>More than 10% of flows are malicious. Immediate action recommended.</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Visualization
-    st.markdown("### 📈 Threat Distribution")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Pie chart
-        fig_pie = go.Figure(data=[go.Pie(
-            labels=['Benign', 'Malicious'],
-            values=[benign_count, mal_count],
-            hole=0.4,
-            marker=dict(colors=['#22c55e', '#ef4444']),
-            textinfo='label+percent',
-            textfont=dict(size=14, color='white')
-        )])
-        fig_pie.update_layout(
-            title="Flow Classification",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='white'),
-            showlegend=True
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-    
-    with col2:
-        # Bar chart
-        fig_bar = go.Figure(data=[
-            go.Bar(
-                x=['Benign', 'Malicious'],
-                y=[benign_count, mal_count],
-                marker=dict(color=['#22c55e', '#ef4444']),
-                text=[f"{benign_count:,}", f"{mal_count:,}"],
-                textposition='auto',
-            )
-        ])
-        fig_bar.update_layout(
-            title="Flow Count Comparison",
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='white'),
-            yaxis=dict(gridcolor='rgba(148, 163, 184, 0.1)'),
-            showlegend=False
-        )
-        st.plotly_chart(fig_bar, use_container_width=True)
-    
-    # Malicious flows table
-    st.markdown("### 🚨 Malicious Flows Detected")
-    st.dataframe(
-        malicious_flows.head(limit_display),
-        use_container_width=True,
-        height=400
-    )
-    
-    # Top talkers
-    st.markdown("### 🔝 Top Threat Sources")
-    col1, col2 = st.columns(2)
-    
-    # Check if IP columns exist
-    if 'src_ip' in malicious_flows.columns:
-        with col1:
-            st.markdown("#### 📤 Top Source IPs")
-            top_src = malicious_flows['src_ip'].value_counts().head(10)
-            st.dataframe(
-                top_src.to_frame('Count'),
-                use_container_width=True
-            )
-    
-    if 'dst_ip' in malicious_flows.columns:
-        with col2:
-            st.markdown("#### 📥 Top Destination IPs")
-            top_dst = malicious_flows['dst_ip'].value_counts().head(10)
-            st.dataframe(
-                top_dst.to_frame('Count'),
-                use_container_width=True
-            )
-    
-    # Download button
-    st.markdown("### 💾 Export Results")
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        csv = malicious_flows.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="⬇️ Download Malicious Flows as CSV",
-            data=csv,
-            file_name=f"malicious_flows_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-        )
-    
-    with col2:
-        if st.button("🔄 Analyze Another File"):
-            st.rerun()
+
+    # Parse API response
+    total = result.get("total_flows", 0)
+    mal_count = result.get("malicious_flows", 0)
+    ratio = result.get("malicious_ratio", 0.0)
+    returned = result.get("returned_flows", 0)
+    malicious_sample = result.get("malicious_sample", [])
+    top_sources = result.get("top_source_ips", {})
+    top_dests = result.get("top_destination_ips", {})
+
+    # Convert sample to DataFrame for display and download
+    malicious_flows_df = pd.DataFrame(malicious_sample)
+
+    # Minimal display of results
+    st.metric("Total Flows", total)
+    st.metric("Malicious Flows", mal_count)
+    st.metric("Malicious Ratio", f"{ratio:.2%}")
+
+    if not malicious_flows_df.empty:
+        with st.expander(f"🚨 Malicious sample ({returned} rows)"):
+            st.dataframe(malicious_flows_df, use_container_width=True)
+        csv_down = malicious_flows_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Download malicious sample CSV", data=csv_down, file_name="malicious_sample.csv", mime="text/csv")
+
+    # simple charts for top IPs
+    if top_sources:
+        src_df = pd.DataFrame(list(top_sources.items()), columns=["src_ip", "count"])
+        fig = px.bar(src_df, x="src_ip", y="count", title="Top Malicious Source IPs")
+        st.plotly_chart(fig, use_container_width=True)
+
+    if top_dests:
+        dst_df = pd.DataFrame(list(top_dests.items()), columns=["dst_ip", "count"])
+        fig = px.bar(dst_df, x="dst_ip", y="count", title="Top Malicious Destination IPs")
+        st.plotly_chart(fig, use_container_width=True)
 
 
 if __name__ == "__main__":
